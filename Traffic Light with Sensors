@@ -1,0 +1,159 @@
+#define A 10  //Data
+#define SC 11 //Serial clock
+#define LC 12 //Latch clock
+
+byte lamps = B00110010; //7 - 5,4,3; red ped - green yellow red || 6 - 2,1,0; red ped - green yellow red
+
+//Direction=  B:AAA BBB A    B
+//Color=      B:ryg ryg r(g) r(g)
+byte AtoB[4] = {
+  B01010010,
+  B10010011,
+  B10011011,
+  B10000101 //B state is set here
+};
+byte BtoA[4] = {
+  B10001001,
+  B10010011,
+  B11010011,
+  B00110010 //A state is set here
+};
+byte lampState;
+
+unsigned long timer1 = 0; //Used to log timedelay during lampchange
+unsigned long timer2 = 0; //Used to log timedelay between automatic lampchanges
+int state = 0;
+byte runLog = 0;
+
+byte supportFlags = B00010000; //7: Changing to DirB; 6: Changing to DirA; 5: Active is DirB; 4: Active is DirA ; 3: DirB2; 2: DirB1; 1: DirA2; 0: DirA1
+unsigned long currentTime;
+int lastTimes [8] = {0, 0, 0, 0, 0, 0, 0, 0}; //last time the waitTimes was updated
+int waitTimes [8] = {0, 0, 0, 0, 0, 0, 0, 0}; // (0,1) DirA1; (2,3) DirA2; (4,5) DirB1; (6,7) DirB2; waiting time stored as xxx decisecond
+byte onCheck = B00000000; //Grouped: (7,6) DirB2; (5,4) DirB1; (3,2) DirA2; (1,0) DirA1; Significant is the Higher Bit
+              //red, orange, yellow, green, blue, purple, grey, white
+void setup() {
+  DDRD = DDRD | B00000000; //pinMode(i, INPUT); for pin 7,6,5,4,3,2,(Care: TX:1,RX:0)
+  DDRB = B111100;   //pinMode(i, INPUT); for pin 13,12,11,10,9,8, (DDRB bit 7,6 not usable)
+  shift(BtoA[3]);
+  Serial.begin(9600);
+}
+
+void loop() {
+  do {
+    if (runLog == 0) {
+      runLog = 1;
+      currentTime = millis();
+      if ((timer2 + 60000) <= millis()) {
+        autoChange();
+      }
+      statusRead();
+      flagCheck();
+      if (bitRead(supportFlags, 7)) {
+        lampState = AtoB[state];
+        lampChange();
+      }
+      else if (bitRead(supportFlags, 6)) {
+        lampState = BtoA[state];
+        lampChange();
+      }
+      delay(1);
+    }
+    if (millis()%1000 == 0) {
+      runLog = 0;
+    }
+  } while (true);  
+}
+
+
+//Shifts data out to the shift register
+void shift(byte data) {
+  digitalWrite(LC, LOW);
+  shiftOut(A, SC, LSBFIRST, data);
+  digitalWrite(LC, HIGH);
+}
+
+
+//This bit reads all the sensors, and updates the duration of the active state of each sensor
+//Runtime is between 700-900 microsecs (less than 1 milli)
+void statusRead() {
+  for (int i = 0; i < 8; i++) {
+    if (digitalRead(i+2)) {
+      if (bitRead(onCheck, i)) {
+        waitTimes [i] = ((currentTime/100)-lastTimes[i]);
+      }
+      bitSet(onCheck, (i));
+    }
+    else {
+      bitClear(onCheck, (i));
+      waitTimes [i] = 0;
+      lastTimes [i] = (currentTime/100);
+      //while digitalRead(i+2) is 0, update the lastTimes i
+    }
+  }
+}
+
+//Reads if support flags are set or not and a lamp change should be triggered, or not
+//Sets support flags for lamp change, if wait times are great enough
+void flagCheck() {
+  if (bitRead(supportFlags, 4) && (bitRead(supportFlags, 3) || bitRead(supportFlags, 2))) {
+    supportFlags = supportFlags ^ B10010000;
+  }
+  else if (bitRead(supportFlags, 5) && (bitRead(supportFlags, 1) || bitRead(supportFlags, 0))) {
+    supportFlags = supportFlags ^ B01100000;
+  }
+  for (int i = 0; i < 4; i++) {
+    if (((waitTimes[i*2] >= 200) && (waitTimes[i*2+1] >= 100)) || (waitTimes[i*2] >= 400)) {
+      bitSet(supportFlags, i);
+    }
+    else {
+      bitClear(supportFlags, i);
+    }
+  }
+}
+
+//Cycles trough the states
+void lampChange() {
+  switch (state) {
+    case 0:
+      shift(lampState);
+      timer1 = millis();
+      state++;
+      break;
+    case 1:
+      if ((timer1 + 5000) <= millis()) {
+        shift(lampState);
+        timer1 = millis();
+        state++;
+      }
+      break;
+    case 2:
+      if ((timer1 + 2000) <= millis()) {
+        shift(lampState);
+        timer1 = millis();
+        state++;
+      }
+      break;
+    case 3:
+      if ((timer1 + 2000) <= millis()) {
+        shift(lampState);
+        if (bitRead(supportFlags, 7)) {
+          supportFlags = supportFlags ^ B10100000; //inverting 7 (changing to DirB) and 5 (Active is DirB), if 7 was 1
+        }
+        else {
+          supportFlags = supportFlags ^ B01010000; //inverting 6 (changing to DirA) and 4 (Active is DirA), if 7 was 0
+        }
+        state = 0;
+        timer2 = millis();
+      }
+      break;
+  }
+}
+
+void autoChange() {
+  if (bitRead(supportFlags, 4)) {
+    supportFlags = supportFlags ^ B10010000;
+  }
+  else if (bitRead(supportFlags, 5)) {
+    supportFlags = supportFlags ^ B01100000;
+  }
+}
